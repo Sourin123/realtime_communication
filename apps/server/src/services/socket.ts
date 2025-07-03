@@ -1,165 +1,135 @@
-/**
- * SocketService manages the Socket.IO server instance and its event listeners.
- * 
- * @remarks
- * This service is responsible for initializing the Socket.IO server with CORS configuration,
- * handling client connections, managing user-specific rooms, and processing real-time messaging events.
- * 
- * @example
- * ```typescript
- * const socketService = new SocketService();
- * socketService.initListeners();
- * ```
- * 
- * @property _io - The underlying Socket.IO server instance.
- * @constructor Initializes the Socket.IO server with CORS settings.
- * @method io - Getter for the Socket.IO server instance.
- * @method initListeners - Sets up event listeners for client connections and messaging.
- */
-
-
-
 import { Server } from "socket.io";
 import 'dotenv/config';
 import MessageModel from "../db/Message";
 import UserSocketModel from "../db/UserSocket";
 
-/**
- * SocketService manages the initialization and event handling for the Socket.IO server.
- * Use this service to set up real-time communication between clients and the server.
- */
 class SocketService {
     private _io: Server;
+    
     constructor() {
-        // Initialize the Socket.IO server
         console.log("Initializing Socket.IO server...");
-        
         this._io = new Server({
-            cors:{
+            cors: {
                 allowedHeaders: ["*"],
                 origin: "*",
             }
         });
     }
-    get io(){
+
+    get io() {
         return this._io;
     }
 
-    /**
-     * Initializes Socket.IO event listeners for handling real-time communication.
-     *
-     * - Listens for new client connections and logs their socket IDs.
-     * - Handles the "join" event to add a socket to a user-specific room and updates the user-socket mapping in MongoDB.
-     * - Handles the "event:message" event to:
-     *   - Save incoming messages to the database.
-     *   - Emit the saved message to both the sender's and receiver's rooms for private chat functionality.
-     *   - Optionally, can emit messages to all clients for group chat scenarios.
-     *
-     * @remarks
-     * This method should be called once during server startup to ensure all relevant Socket.IO events are handled.
-     */
-    
-    public initListeners(){
-        // Set up event listeners for the Socket.IO server
+    public initListeners() {
         console.log("Setting up Socket.IO event listeners...");
         const io = this._io;
-       return io.on("connect", socket => {
+        
+        io.on("connection", (socket) => {
             console.log(`New client connected: ${socket.id}`);
-            // Listen for the "join" event to register a user with their socket ID
             
+            // Handle user registration
+            socket.on("register", async (data: { userId: string }) => {
+                try {
+                    console.log(`User ${data.userId} registering with socket ${socket.id}`);
+                    await this.create_and_linking(data.userId, socket.id);
+                    socket.emit("registered", { success: true, userId: data.userId });
+                } catch (error) {
+                    console.error("Error registering user:", error);
+                    socket.emit("registered", { success: false, error: "Registration failed" });
+                }
+            });
+
+            // Handle joining private rooms
+            socket.on("join:room", async (data: { users: string[] }) => {
+                try {
+                    if (data.users.length === 2) {
+                        const [userA, userB] = data.users;
+                        const roomName = await this.joinPrivateRoom(userA, userB);
+                        socket.emit("room:joined", { room: roomName, users: data.users });
+                        console.log(`Users ${userA} and ${userB} joined room: ${roomName}`);
+                    }
+                } catch (error) {
+                    console.error("Error joining room:", error);
+                    socket.emit("room:error", { error: "Failed to join room" });
+                }
+            });
+
+            // Handle private messages
+            socket.on("event:message", async (data: { message: string; to: string; from: string }) => {
+                try {
+                    console.log(`Message from ${data.from} to ${data.to}: ${data.message}`);
+                    await this.sendPrivateMessage(data.from, data.to, data.message);
+                } catch (error) {
+                    console.error("Error sending message:", error);
+                    socket.emit("message:error", { error: "Failed to send message" });
+                }
+            });
+
+            // Handle disconnection
+            socket.on("disconnect", () => {
+                console.log(`Client disconnected: ${socket.id}`);
+            });
         });
     }
 
-    /**
-     * Checks if a user exists in the UserSocketModel.
-     * If not, registers the user with the provided socketId.
-     * If already registered, throws an error.
-     * @param userId - The user's unique identifier.
-     * @param socketId - The socket ID to associate with the user.
-     * @returns The created user-socket document or throws an error.
-         */
-        public async create_and_linking(userId: string, socketId: string) {
-            await UserSocketModel.findOneAndUpdate(
-                { userId },
-                { socketId },
-                { upsert: true, new: true }
-            );
+    public async create_and_linking(userId: string, socketId: string) {
+        await UserSocketModel.findOneAndUpdate(
+            { userId },
+            { socketId },
+            { upsert: true, new: true }
+        );
+    }
+
+    public async joinPrivateRoom(userA: string, userB: string): Promise<string> {
+        const io = this._io;
+        const roomName = [userA, userB].sort().join("_");
+
+        const userASocket = await UserSocketModel.findOne({ userId: userA });
+        const userBSocket = await UserSocketModel.findOne({ userId: userB });
+
+        if (userASocket?.socketId) {
+            const socketA = io.sockets.sockets.get(userASocket.socketId);
+            if (socketA) {
+                socketA.join(roomName);
+                console.log(`User ${userA} joined room ${roomName}`);
+            }
         }
-
-        /**
- * Joins two users to a private one-on-one chat room.
- * 
- * @remarks
- * This method ensures both users are joined to a unique, order-independent private room.
- * It can be called after user authentication or when a private chat is initiated.
- * 
- * @param userA - The first user's unique identifier.
- * @param userB - The second user's unique identifier.
- * @returns The name of the private room.
- * 
- * @example
- * ```typescript
- * await socketService.joinPrivateRoom('user1', 'user2');
- * ```
- */
-public async joinPrivateRoom(userA: string, userB: string): Promise<string> {
-    const io = this._io;
-    // Create a unique, order-independent room name
-    const roomName = [userA, userB].sort().join("_");
-
-    // Find socket IDs for both users
-    const userASocket = await UserSocketModel.findOne({ userId: userA });
-    const userBSocket = await UserSocketModel.findOne({ userId: userB });
-
-    if (userASocket?.socketId) {
-        io.sockets.sockets.get(userASocket.socketId)?.join(roomName);
+        if (userBSocket?.socketId) {
+            const socketB = io.sockets.sockets.get(userBSocket.socketId);
+            if (socketB) {
+                socketB.join(roomName);
+                console.log(`User ${userB} joined room ${roomName}`);
+            }
+        }
+        return roomName;
     }
-    if (userBSocket?.socketId) {
-        io.sockets.sockets.get(userBSocket.socketId)?.join(roomName);
+
+    public async sendPrivateMessage(from: string, to: string, message: string) {
+        const io = this._io;
+        const roomName = [from, to].sort().join("_");
+
+        // Ensure both users are joined to the private room
+        await this.joinPrivateRoom(from, to);
+
+        // Save the message to the database
+        const savedMessage = await MessageModel.create({
+            from,
+            to,
+            message,
+            timestamp: new Date()
+        });
+
+        // Emit the message to the private room
+        io.to(roomName).emit("event:message", {
+            from,
+            to,
+            message,
+            timestamp: savedMessage.timestamp
+        });
+
+        console.log(`Message sent to room ${roomName}: ${message}`);
+        return savedMessage;
     }
-    return roomName;
 }
-
-/**
- * Handles sending a one-on-one private message between two users.
- * Ensures both users are joined to their private room and emits the message only to that room.
- *
- * @param from - The sender's user ID.
- * @param to - The receiver's user ID.
- * @param message - The message content.
- * @returns The saved message document.
- * @example
- * await socketService.sendPrivateMessage('user1', 'user2', 'Hello!');
- */
-public async sendPrivateMessage(from: string, to: string, message: string) {
-    const io = this._io;
-    // Create a unique, order-independent room name
-    const roomName = [from, to].sort().join("_");
-
-    // Ensure both users are joined to the private room
-    await this.joinPrivateRoom(from, to);
-
-    // Save the message to the database
-    const savedMessage = await MessageModel.create({
-        from,
-        to,
-        message,
-        room: roomName,
-        timestamp: new Date()
-    });
-
-    // Emit the message to the private room
-    io.to(roomName).emit("private:message", {
-        from,
-        to,
-        message,
-        room: roomName,
-        timestamp: savedMessage.timestamp
-    });
-
-    return savedMessage;
-}
-}
-// This service can be imported and used in your server setup file to initialize the Socket.IO server and listeners.
 
 export default SocketService;

@@ -28,9 +28,22 @@ export const SocketProvider: React.FC<socketProviderProps> = ({ children }) => {
     const _socket = io("http://localhost:8000");
     setSocket(_socket);
 
-    // Replace with your actual userId (from auth or context)
+    // FIXED: Use "register" event instead of "join"
     const userId = localStorage.getItem("userId") || "user1";
-    _socket.emit("join", userId);
+    _socket.emit("register", { userId }); // Changed from "join" to "register"
+
+    // Add some basic event listeners
+    _socket.on("registered", (data) => {
+      console.log("User registered:", data);
+    });
+
+    _socket.on("connect", () => {
+      console.log("Connected to server");
+    });
+
+    _socket.on("disconnect", () => {
+      console.log("Disconnected from server");
+    });
 
     return () => {
       _socket.disconnect();
@@ -59,4 +72,3 @@ export const SocketProvider: React.FC<socketProviderProps> = ({ children }) => {
     </socketContext.Provider>
   );
 };
-
